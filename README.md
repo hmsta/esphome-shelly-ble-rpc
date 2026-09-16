@@ -7,6 +7,39 @@ RPC service and forwards the readings through ESPHome's native API.
 This is a community **external component**, not a built-in ESPHome component
 or an official Shelly integration.
 
+## Security warning: enabling BLE RPC
+
+> [!WARNING]
+> On the tested Shelly Plus i4 with firmware 1.7.5, this component uses BLE RPC
+> without a password or pairing. Treat the enabled RPC service as accessible
+> to anyone within Bluetooth range. This component only reads inputs, but it
+> does **not** restrict other clients to those reads or prevent configuration
+> changes through the Shelly's RPC service.
+
+Your Wi-Fi password and ESPHome API encryption do not protect this separate
+Bluetooth connection. Configuring the Shelly's MAC address selects the device
+for our client; it does not create an access whitelist on the Shelly. Keeping
+our client connected is not a security boundary either.
+
+Shelly introduced mandatory BLE RPC pairing outside initial setup in
+[firmware 2.0.0](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/BLE/#ble-security-and-bonding).
+The **Plus i4 is feature-frozen on 1.7.x and will not receive 2.0.0**, according
+to [Shelly's firmware policy](https://shelly-api-docs.shelly.cloud/gen2/General/FirmwareUpdatePolicy/).
+This component does not implement the newer pairing mechanism.
+
+Shelly documents Wi-Fi passwords as write-only and omits them from
+[`WiFi.GetConfig`](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/WiFi/#configuration).
+That prevents direct retrieval through that method; it is **not** a guarantee
+against other RPC misuse or firmware vulnerabilities.
+
+Disabling **Enable RPC** closes this BLE RPC access, but also stops this
+component's input polling. There is no access restriction this ESPHome client
+can add to the tested Shelly firmware. Use this setup only if that nearby-access
+risk is acceptable. If it is not, provide reliable Wi-Fi connectivity and use
+authenticated network access with BLE RPC disabled, or evaluate hardware with
+protected BLE RPC and a compatible client. Consider actual radio coverage,
+including areas outside your property, when assessing the risk.
+
 ## Tested hardware
 
 **Only the Shelly Plus i4 has been tested on physical hardware.**
