@@ -1,0 +1,10 @@
+.venv/
+.cache/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+**/.esphome/
+.platformio/
+secrets.yaml
+**/secrets.yaml
+tests/native/build/

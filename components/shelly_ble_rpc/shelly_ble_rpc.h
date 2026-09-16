@@ -1,0 +1,68 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/ble_client/ble_client.h"
+#include "esphome/core/component.h"
+
+namespace esphome::shelly_ble_rpc {
+
+// One RPC transaction at a time, using Shelly's DATA/TX_CTL/RX_CTL GATT service.
+// The BLE stack, connection lifecycle and Wi-Fi remain owned by ESPHome.
+class ShellyBLERPC : public PollingComponent, public ble_client::BLEClientNode {
+ public:
+  void setup() override;
+  void dump_config() override;
+  void update() override;
+  void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
+                           esp_ble_gattc_cb_param_t *param) override;
+  void set_input(uint8_t index, binary_sensor::BinarySensor *sensor) { this->inputs_[index] = sensor; }
+  void set_on_delay(uint8_t index, uint32_t delay) { this->on_delays_[index] = delay; }
+  void set_connected(binary_sensor::BinarySensor *sensor) { this->connected_ = sensor; }
+  void set_response_timeout(uint32_t timeout) { this->response_timeout_ = timeout; }
+
+ protected:
+  enum class Phase : uint8_t { IDLE, WRITE_LENGTH, WRITE_DATA, WAIT_LENGTH, READ_LENGTH, READ_DATA };
+  static constexpr size_t MAX_FRAME_SIZE = 512;
+  // Always fits the mandatory minimum ATT MTU (23). No dependency on MTU negotiation.
+  static constexpr size_t WRITE_CHUNK_SIZE = 20;
+
+  void start_request_();
+  void write_chunk_();
+  void read_length_();
+  void read_data_();
+  void process_frame_();
+  void fail_(const char *reason);
+  void invalidate_();
+  void reset_connection_();
+  bool write_(uint16_t handle, uint8_t *data, uint16_t length);
+  bool read_(uint16_t handle);
+
+  std::array<binary_sensor::BinarySensor *, 4> inputs_{};
+  std::array<bool, 4> pending_states_{};
+  std::array<uint32_t, 4> on_delays_{};
+  std::array<bool, 4> delay_pending_{};
+  binary_sensor::BinarySensor *connected_{nullptr};
+  std::array<uint8_t, MAX_FRAME_SIZE> frame_{};
+  std::array<char, 128> request_{};
+  uint32_t response_timeout_{5000};
+  uint32_t request_id_{0};
+  size_t frame_length_{0};
+  size_t frame_received_{0};
+  size_t request_length_{0};
+  size_t request_sent_{0};
+  size_t write_pending_{0};
+  uint16_t data_handle_{0};
+  uint16_t tx_handle_{0};
+  uint16_t rx_handle_{0};
+  uint16_t conn_id_{0xFFFF};
+  uint8_t input_index_{0};
+  Phase phase_{Phase::IDLE};
+  bool ready_{false};
+  bool poll_succeeded_{false};
+};
+
+}  // namespace esphome::shelly_ble_rpc

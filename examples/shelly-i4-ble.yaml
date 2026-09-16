@@ -1,0 +1,53 @@
+# Standalone local-checkout example. Set Wi-Fi credentials and the Shelly BLE MAC
+# before flashing. See README.md for installation directly from GitHub.
+esphome:
+  name: shelly-i4-ble-test
+  min_version: 2026.8.2
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+    version: 5.5.5
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [shelly_ble_rpc]
+
+logger:
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "REPLACE_WITH_WIFI_SSID"
+  password: "REPLACE_WITH_WIFI_PASSWORD"
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+
+ble_client:
+  - id: shelly_i4_client
+    # Bluetooth MAC from the i4 Bluetooth settings (not its Wi-Fi MAC).
+    mac_address: AA:BB:CC:DD:EE:FF
+
+shelly_ble_rpc:
+  id: shelly_i4
+  ble_client_id: shelly_i4_client
+  update_interval: 5s
+  response_timeout: 5s
+  input_0:
+    name: "Shelly i4 Input 1"
+    # Optional: require observed ON for ten seconds; OFF is not delayed.
+    # on_delay: 10s
+  input_1:
+    name: "Shelly i4 Input 2"
+  input_2:
+    name: "Shelly i4 Input 3"
+  input_3:
+    name: "Shelly i4 Input 4"
+  connected:
+    name: "Shelly i4 Polling Healthy"
