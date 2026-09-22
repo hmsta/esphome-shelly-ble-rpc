@@ -11,6 +11,8 @@ struct Fixture {
   ShellyBLERPC rpc;
   esphome::binary_sensor::BinarySensor inputs[4];
   esphome::binary_sensor::BinarySensor healthy;
+  esphome::shelly_ble_rpc::ShellyRPCSwitch outputs[2];
+  esphome::shelly_ble_rpc::ShellyRPCCover cover;
 
   explicit Fixture(bool all = true) {
     operations.clear();
@@ -58,7 +60,7 @@ struct Fixture {
   void length(uint32_t n) {
     read(12, {uint8_t(n >> 24), uint8_t(n >> 16), uint8_t(n >> 8), uint8_t(n)});
   }
-  uint32_t request(unsigned expected_input) {
+  uint32_t request_rpc(const char *expected_method, unsigned expected_channel, int expected_on = -1, int expected_pos = -1) {
     auto prefix = operations.back();
     assert(prefix.write && prefix.handle == 11 && prefix.data.size() == 4);
     uint32_t size = (uint32_t(prefix.data[0]) << 24) | (uint32_t(prefix.data[1]) << 16) |
@@ -74,10 +76,15 @@ struct Fixture {
     assert(request.size() == size && operations.back().handle == 12);
     JsonDocument doc;
     assert(!deserializeJson(doc, request));
-    assert(doc["method"] == "Input.GetStatus");
-    assert(doc["params"]["id"].as<unsigned>() == expected_input);
+    assert(doc["method"] == expected_method);
+    assert(doc["params"]["id"].as<unsigned>() == expected_channel);
+    if (expected_on >= 0)
+      assert(doc["params"]["on"].as<bool>() == bool(expected_on));
+    if (expected_pos >= 0)
+      assert(doc["params"]["pos"].as<int>() == expected_pos);
     return doc["id"].as<uint32_t>();
   }
+  uint32_t request(unsigned expected_input) { return request_rpc("Input.GetStatus", expected_input); }
   void frame(const std::string &json, size_t chunk_size = 7) {
     length(json.size());
     for (size_t i = 0; i < json.size(); i += chunk_size) {
@@ -91,6 +98,109 @@ struct Fixture {
           ",\"state\":" + (state ? "true" : "false") + "}}");
   }
 };
+
+void test_switch_outputs() {
+  Fixture f(false);
+  // Output-only configuration: no input sensors are needed at runtime.
+  f.rpc.set_input(2, nullptr);
+  for (int i = 0; i < 2; i++) {
+    f.outputs[i].set_parent(&f.rpc);
+    f.outputs[i].set_channel(i);
+    f.rpc.set_switch(i, &f.outputs[i]);
+  }
+  f.connect();
+  auto id0 = f.request_rpc("Switch.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(id0) + ",\"result\":{\"id\":0,\"output\":false}}");
+  auto id1 = f.request_rpc("Switch.GetStatus", 1);
+  f.frame("{\"id\":" + std::to_string(id1) + ",\"result\":{\"id\":1,\"output\":true}}");
+  assert(f.healthy.state && !f.outputs[0].state && f.outputs[1].state);
+  f.rpc.command_switch(0, true);
+  auto set_id = f.request_rpc("Switch.Set", 0, 1);
+  f.frame("{\"id\":" + std::to_string(set_id) + ",\"result\":{\"was_on\":false}}");
+  // The set acknowledgement is not the current state; a status poll follows.
+  assert(!f.outputs[0].state);
+  id0 = f.request_rpc("Switch.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(id0) + ",\"result\":{\"id\":0,\"output\":true}}");
+  id1 = f.request_rpc("Switch.GetStatus", 1);
+  f.frame("{\"id\":" + std::to_string(id1) + ",\"result\":{\"id\":1,\"output\":true}}");
+  assert(f.outputs[0].state && f.outputs[1].state);
+  f.rpc.command_switch(1, false);
+  auto bad = f.request_rpc("Switch.Set", 1, 0);
+  f.frame("{\"id\":" + std::to_string(bad) + ",\"error\":{\"code\":-1}}");
+  assert(f.client.disconnects == 1 && !f.healthy.state);
+}
+
+void test_cover_output() {
+  Fixture f(false);
+  f.rpc.set_input(2, nullptr);
+  f.cover.set_parent(&f.rpc);
+  f.cover.set_position_control(true);
+  f.rpc.set_cover(&f.cover);
+  f.connect();
+  auto id = f.request_rpc("Cover.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":{\"id\":0,\"state\":\"opening\",\"current_pos\":25,\"pos_control\":true}}");
+  assert(f.healthy.state && f.cover.position == 0.25f &&
+         f.cover.current_operation == esphome::cover::COVER_OPERATION_OPENING);
+  f.rpc.command_cover(4, 75);
+  id = f.request_rpc("Cover.GoToPosition", 0, -1, 75);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":null}");
+  id = f.request_rpc("Cover.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":{\"id\":0,\"state\":\"closing\",\"current_pos\":70}}");
+  assert(f.cover.position == 0.70f && f.cover.current_operation == esphome::cover::COVER_OPERATION_CLOSING);
+  f.rpc.command_cover(3);
+  id = f.request_rpc("Cover.Stop", 0);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":null}");
+  id = f.request_rpc("Cover.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":{\"id\":0,\"state\":\"stopped\",\"current_pos\":70}}");
+  assert(f.cover.current_operation == esphome::cover::COVER_OPERATION_IDLE);
+  f.rpc.command_cover(1);
+  id = f.request_rpc("Cover.Open", 0);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":null}");
+  id = f.request_rpc("Cover.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":{\"id\":0,\"state\":\"open\",\"current_pos\":100}}");
+  assert(f.cover.position == esphome::cover::COVER_OPEN);
+  f.rpc.command_cover(2);
+  id = f.request_rpc("Cover.Close", 0);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":null}");
+  id = f.request_rpc("Cover.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(id) + ",\"result\":{\"id\":0,\"state\":\"closed\",\"current_pos\":0}}");
+  assert(f.cover.position == esphome::cover::COVER_CLOSED);
+}
+
+void test_command_waits_for_active_rpc() {
+  Fixture f(false);
+  f.rpc.set_input(2, nullptr);
+  f.outputs[0].set_parent(&f.rpc);
+  f.outputs[0].set_channel(0);
+  f.rpc.set_switch(0, &f.outputs[0]);
+  f.connect();
+  auto status_id = f.request_rpc("Switch.GetStatus", 0);
+  f.rpc.command_switch(0, true);
+  f.rpc.command_switch(0, false);  // The last desired state wins while queued.
+  f.frame("{\"id\":" + std::to_string(status_id) + ",\"result\":{\"id\":0,\"output\":true}}");
+  auto set_id = f.request_rpc("Switch.Set", 0, 0);
+  f.frame("{\"id\":" + std::to_string(set_id) + ",\"result\":{\"was_on\":true}}");
+  status_id = f.request_rpc("Switch.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(status_id) + ",\"result\":{\"id\":0,\"output\":false}}");
+  assert(!f.outputs[0].state && f.healthy.state);
+}
+
+void test_cover_command_after_input_poll() {
+  Fixture f(false);
+  f.cover.set_parent(&f.rpc);
+  f.rpc.set_cover(&f.cover);
+  f.connect();
+  auto input_id = f.request(2);
+  f.rpc.command_cover(3);
+  f.response(input_id, 2, false);
+  const auto stop_id = f.request_rpc("Cover.Stop", 0);
+  f.frame("{\"id\":" + std::to_string(stop_id) + ",\"result\":null}");
+  input_id = f.request(2);
+  f.response(input_id, 2, false);
+  const auto status_id = f.request_rpc("Cover.GetStatus", 0);
+  f.frame("{\"id\":" + std::to_string(status_id) + ",\"result\":{\"id\":0,\"state\":\"closed\"}}");
+  assert(f.healthy.state && f.cover.position == esphome::cover::COVER_CLOSED);
+}
 
 void test_full_poll_and_reconnect() {
   Fixture f;
@@ -197,7 +307,7 @@ void test_transport_failures() {
     f.connect();
     f.request(0);
     switch (scenario) {
-      case 0: f.length(513); break;
+      case 0: f.length(2049); break;
       case 1: f.length(0xFFFFFFFFU); break;
       case 2: f.read(12, {0, 1}); break;
       case 3: f.length(2); f.read(10, {}); break;
@@ -347,5 +457,9 @@ int main() {
   test_transport_failures();
   test_pairing_gate_and_reconnect();
   test_pairing_failures_and_event_order();
+  test_switch_outputs();
+  test_cover_output();
+  test_command_waits_for_active_rpc();
+  test_cover_command_after_input_poll();
   std::cout << "Shelly RPC transaction tests passed\n";
 }

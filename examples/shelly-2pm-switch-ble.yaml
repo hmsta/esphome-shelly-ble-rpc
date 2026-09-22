@@ -1,0 +1,41 @@
+# Two independent relays. Set the Shelly 2PM profile to "switch" first.
+# For a Plus 2PM on firmware 1.7.x, omit esp32_ble and set pairing: false.
+esphome:
+  name: shelly-2pm-switch-ble-test
+  min_version: 2026.8.2
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+    version: 5.5.5
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [shelly_ble_rpc]
+logger:
+api:
+ota:
+  - platform: esphome
+wifi:
+  ssid: "REPLACE_WITH_WIFI_SSID"
+  password: "REPLACE_WITH_WIFI_PASSWORD"
+esp32_ble:
+  io_capability: none
+  auth_req_mode: bond
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+ble_client:
+  - id: shelly_client
+    mac_address: AA:BB:CC:DD:EE:FF
+shelly_ble_rpc:
+  id: shelly_outputs
+  ble_client_id: shelly_client
+  pairing: true
+  switch_0:
+    name: "Shelly Relay 1"
+  switch_1:
+    name: "Shelly Relay 2"
+  connected:
+    name: "Shelly RPC Healthy"

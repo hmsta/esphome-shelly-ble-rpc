@@ -1,0 +1,40 @@
+# One cover. Set the Shelly 2PM profile to "cover" first and calibrate it in
+# the Shelly UI before enabling position_control.
+esphome:
+  name: shelly-2pm-cover-ble-test
+  min_version: 2026.8.2
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+    version: 5.5.5
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [shelly_ble_rpc]
+logger:
+api:
+ota:
+  - platform: esphome
+wifi:
+  ssid: "REPLACE_WITH_WIFI_SSID"
+  password: "REPLACE_WITH_WIFI_PASSWORD"
+esp32_ble:
+  io_capability: none
+  auth_req_mode: bond
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+ble_client:
+  - id: shelly_client
+    mac_address: AA:BB:CC:DD:EE:FF
+shelly_ble_rpc:
+  id: shelly_cover
+  ble_client_id: shelly_client
+  pairing: true
+  cover_0:
+    name: "Shelly Blind"
+    position_control: true
+  connected:
+    name: "Shelly RPC Healthy"

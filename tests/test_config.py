@@ -31,6 +31,11 @@ ROOT = Path(__file__).resolve().parents[1]
         ("pairing_timeout_short", False),
         ("pairing_timeout_long", False),
         ("mixed", True),
+        ("two_switches", True),
+        ("one_switch_only", True),
+        ("cover_only", True),
+        ("cover_and_switch", False),
+        ("unknown_switch", False),
     ],
 )
 def test_config(tmp_path, change, valid):
@@ -77,6 +82,17 @@ def test_config(tmp_path, change, valid):
             legacy[key]["name"] = "Legacy " + legacy[key]["name"]
         config["ble_client"].append({"id": "legacy_client", "mac_address": "AA:BB:CC:DD:EE:FF"})
         config["shelly_ble_rpc"] = [rpc, legacy]
+    if change in ("two_switches", "one_switch_only", "cover_only", "cover_and_switch", "unknown_switch"):
+        for index in range(4):
+            del rpc[f"input_{index}"]
+        if change in ("two_switches", "one_switch_only", "cover_and_switch"):
+            rpc["switch_0"] = {"name": "Relay 1"}
+        if change == "two_switches":
+            rpc["switch_1"] = {"name": "Relay 2"}
+        if change in ("cover_only", "cover_and_switch"):
+            rpc["cover_0"] = {"name": "Blind", "position_control": True}
+        if change == "unknown_switch":
+            rpc["switch_2"] = {"name": "Invalid relay"}
     path = tmp_path / "test.yaml"
     path.write_text(yaml.safe_dump(config))
     result = subprocess.run(
