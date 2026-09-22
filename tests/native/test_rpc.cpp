@@ -27,7 +27,18 @@ struct Fixture {
     esp_ble_gattc_cb_param_t param{};
     rpc.gattc_event_handler(type, 1, &param);
   }
-  void connect() { event(ESP_GATTC_SEARCH_CMPL_EVT); }
+  void connect() {
+    event(ESP_GATTC_CONNECT_EVT);
+    event(ESP_GATTC_SEARCH_CMPL_EVT);
+  }
+  void authenticate(bool success = true, bool matching = true, bool bonded = true) {
+    esp_ble_gap_cb_param_t param{};
+    param.ble_security.auth_cmpl.success = success;
+    param.ble_security.auth_cmpl.auth_mode = bonded ? ESP_LE_AUTH_BOND : 0;
+    if (!matching)
+      param.ble_security.auth_cmpl.bd_addr[0] ^= 1;
+    rpc.gap_event_handler(ESP_GAP_BLE_AUTH_CMPL_EVT, &param);
+  }
   void ack(uint16_t handle, int status = 0, uint16_t conn = 7) {
     esp_ble_gattc_cb_param_t param{};
     param.write.handle = handle;
@@ -84,6 +95,7 @@ struct Fixture {
 void test_full_poll_and_reconnect() {
   Fixture f;
   f.connect();
+  assert(f.client.pair_calls == 0 && operations.back().auth == ESP_GATT_AUTH_REQ_NONE);
   for (int i = 0; i < 4; i++) {
     uint32_t id = f.request(i);
     auto count = operations.size();
@@ -170,6 +182,7 @@ void test_transport_failures() {
     Fixture f;
     esp_ble_gattc_cb_param_t param{};
     param.search_cmpl.status = 5;
+    f.event(ESP_GATTC_CONNECT_EVT);
     f.rpc.gattc_event_handler(ESP_GATTC_SEARCH_CMPL_EVT, 1, &param);
     assert(f.client.disconnects == 1 && operations.empty() && !f.healthy.state);
     f.rpc.update();
@@ -230,6 +243,71 @@ void test_transport_failures() {
   }
 }
 
+void test_pairing_gate_and_reconnect() {
+  Fixture f(false);
+  f.rpc.set_pairing(true);
+  f.connect();
+  assert(f.client.pair_calls == 1 && operations.empty());
+  assert(f.rpc.timers.count("pairing_deadline") && !f.rpc.timers.count("rpc_deadline"));
+  f.rpc.update();
+  f.authenticate(true, false);  // Another BLE client's event must not unlock RPC.
+  assert(operations.empty() && f.rpc.timers.count("pairing_deadline"));
+  f.authenticate();
+  assert(!f.rpc.timers.count("pairing_deadline"));
+  f.response(f.request(2), 2, true);
+  assert(f.healthy.state && f.inputs[2].state);
+  for (const auto &op : operations)
+    assert(op.auth == ESP_GATT_AUTH_REQ_NO_MITM);
+  f.event(ESP_GATTC_DISCONNECT_EVT);
+  operations.clear();
+  f.authenticate();  // Late auth while disconnected cannot restart RPC.
+  assert(operations.empty());
+  f.connect();
+  assert(f.client.pair_calls == 2 && operations.empty());
+  f.authenticate();  // The stack reauthenticates with the saved bond.
+  f.response(f.request(2), 2, false);
+  assert(f.healthy.state && !f.inputs[2].state);
+}
+
+void test_pairing_failures_and_event_order() {
+  for (int scenario = 0; scenario < 4; scenario++) {
+    Fixture f;
+    f.rpc.set_pairing(true);
+    if (scenario == 0)
+      f.client.pair_result = 1;
+    f.connect();
+    if (scenario == 1) f.authenticate(false);
+    if (scenario == 2) f.rpc.fire("pairing_deadline");
+    if (scenario == 3) f.authenticate(true, true, false);
+    assert(f.client.disconnects == 1 && operations.empty() && f.rpc.timers.empty());
+    assert(!f.inputs[0].has_state() && !f.healthy.state);
+    f.authenticate();
+    f.event(ESP_GATTC_SEARCH_CMPL_EVT);  // A queued completion cannot revive a failed link.
+    f.rpc.update();
+    assert(operations.empty() && f.client.pair_calls == 1);
+  }
+  {
+    Fixture f(false);
+    f.rpc.set_pairing(true);
+    f.event(ESP_GATTC_CONNECT_EVT);
+    f.authenticate();  // Peer requested security before discovery completed.
+    assert(operations.empty());
+    f.event(ESP_GATTC_SEARCH_CMPL_EVT);
+    assert(f.client.pair_calls == 0);
+    f.response(f.request(2), 2, true);
+    assert(f.healthy.state);
+  }
+  {
+    Fixture f;
+    f.rpc.set_pairing(true);
+    f.connect();
+    f.event(ESP_GATTC_DISCONNECT_EVT);
+    assert(f.rpc.timers.empty());
+    f.authenticate();
+    assert(operations.empty());
+  }
+}
+
 int main() {
   {
     Fixture f;
@@ -267,5 +345,7 @@ int main() {
   test_subset_and_invalid_payloads();
   test_failed_refresh_invalidates_previous_states();
   test_transport_failures();
+  test_pairing_gate_and_reconnect();
+  test_pairing_failures_and_event_order();
   std::cout << "Shelly RPC transaction tests passed\n";
 }

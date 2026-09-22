@@ -26,6 +26,9 @@ void ShellyBLERPC::dump_config() {
   ESP_LOGCONFIG(TAG, "Shelly BLE RPC inputs:");
   ESP_LOGCONFIG(TAG, "  BLE address: %s", this->parent()->address_str());
   ESP_LOGCONFIG(TAG, "  Response timeout: %u ms", static_cast<unsigned>(this->response_timeout_));
+  ESP_LOGCONFIG(TAG, "  Pairing: %s", this->pairing_ ? "required (bonded)" : "legacy");
+  if (this->pairing_)
+    ESP_LOGCONFIG(TAG, "  Pairing timeout: %u ms", static_cast<unsigned>(this->pairing_timeout_));
   LOG_UPDATE_INTERVAL(this);
   for (auto *sensor : this->inputs_)
     LOG_BINARY_SENSOR("  ", "Input", sensor);
@@ -49,7 +52,9 @@ void ShellyBLERPC::invalidate_() {
 void ShellyBLERPC::reset_connection_() {
   this->cancel_timeout("rpc_deadline");
   this->cancel_timeout("rpc_next");
+  this->cancel_timeout("pairing_deadline");
   this->ready_ = false;
+  this->authenticated_ = false;
   this->poll_succeeded_ = false;
   this->phase_ = Phase::IDLE;
   this->data_handle_ = this->tx_handle_ = this->rx_handle_ = 0;
@@ -99,7 +104,8 @@ void ShellyBLERPC::start_request_() {
 
 bool ShellyBLERPC::write_(uint16_t handle, uint8_t *data, uint16_t length) {
   auto err = esp_ble_gattc_write_char(this->parent()->get_gattc_if(), this->conn_id_, handle, length, data,
-                                      ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                                      ESP_GATT_WRITE_TYPE_RSP,
+                                      this->pairing_ ? ESP_GATT_AUTH_REQ_NO_MITM : ESP_GATT_AUTH_REQ_NONE);
   if (err != ESP_OK) {
     this->fail_("Unable to queue GATT write");
     return false;
@@ -108,7 +114,8 @@ bool ShellyBLERPC::write_(uint16_t handle, uint8_t *data, uint16_t length) {
 }
 
 bool ShellyBLERPC::read_(uint16_t handle) {
-  auto err = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->conn_id_, handle, ESP_GATT_AUTH_REQ_NONE);
+  auto err = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->conn_id_, handle,
+                                    this->pairing_ ? ESP_GATT_AUTH_REQ_NO_MITM : ESP_GATT_AUTH_REQ_NONE);
   if (err != ESP_OK) {
     this->fail_("Unable to queue GATT read");
     return false;
@@ -165,7 +172,7 @@ void ShellyBLERPC::process_frame_() {
   }
   if (error_code != 0) {
     ESP_LOGW(TAG, "Shelly RPC error %d for input %u", error_code, this->input_index_);
-    this->fail_(error_code == 401 ? "RPC authentication required (not supported)" : "Shelly rejected Input.GetStatus");
+    this->fail_(error_code == 401 ? "RPC password authentication required (not supported by BLE bonding)" : "Shelly rejected Input.GetStatus");
     return;
   }
   if (!valid_state) {
@@ -214,21 +221,60 @@ void ShellyBLERPC::process_frame_() {
   ESP_LOGD(TAG, "Input poll complete");
 }
 
+void ShellyBLERPC::start_when_ready_() {
+  if (this->ready_ || this->conn_id_ == 0xFFFF || this->data_handle_ == 0 ||
+      this->tx_handle_ == 0 || this->rx_handle_ == 0 || (this->pairing_ && !this->authenticated_))
+    return;
+  this->ready_ = true;
+  ESP_LOGI(TAG, "Shelly RPC service ready%s", this->pairing_ ? " (authenticated BLE link)" : "");
+  this->update();
+}
+
+void ShellyBLERPC::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  // BLEClient forwards GAP events to every node, including events for other
+  // peers. Unlike GATTC events, they must be filtered here by remote address.
+  if (!this->pairing_ || this->conn_id_ == 0xFFFF || event != ESP_GAP_BLE_AUTH_CMPL_EVT ||
+      !this->parent()->check_addr(param->ble_security.auth_cmpl.bd_addr))
+    return;
+  const auto &auth = param->ble_security.auth_cmpl;
+  if (!auth.success) {
+    ESP_LOGW(TAG, "BLE authentication failed, reason=0x%02X", unsigned(auth.fail_reason));
+    this->fail_("BLE pairing failed; check Shelly pairing window and saved bonds");
+    return;
+  }
+  if ((auth.auth_mode & ESP_LE_AUTH_BOND) == 0) {
+    this->fail_("BLE peer did not negotiate bonding; refusing unbonded RPC");
+    return;
+  }
+  this->cancel_timeout("pairing_deadline");
+  this->authenticated_ = true;
+  ESP_LOGI(TAG, "Shelly BLE authentication successful (bonding enabled)");
+  // Authentication may complete before service discovery; both are required.
+  this->start_when_ready_();
+}
+
 void ShellyBLERPC::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                                        esp_ble_gattc_cb_param_t *param) {
   switch (event) {
+    case ESP_GATTC_CONNECT_EVT:
+      this->reset_connection_();
+      this->conn_id_ = this->parent()->get_conn_id();
+      break;
     case ESP_GATTC_DISCONNECT_EVT:
     case ESP_GATTC_CLOSE_EVT:
       // BLEClientBase already filters events to this client before node dispatch.
       this->reset_connection_();
       break;
     case ESP_GATTC_SEARCH_CMPL_EVT: {
+      // Ignore queued discovery completion after a failure/disconnect.
+      if (this->conn_id_ == 0xFFFF)
+        break;
       if (param->search_cmpl.status != ESP_GATT_OK) {
         ESP_LOGW(TAG, "GATT service discovery status: %d", param->search_cmpl.status);
         this->fail_("GATT service discovery failed");
         break;
       }
-      this->reset_connection_();
+      // Keep authentication received after CONNECT but before discovery.
       this->conn_id_ = this->parent()->get_conn_id();
       auto service = esp32_ble_tracker::ESPBTUUID::from_raw(SERVICE_UUID);
       auto *data = this->parent()->get_characteristic(service, esp32_ble_tracker::ESPBTUUID::from_raw(DATA_UUID));
@@ -243,9 +289,22 @@ void ShellyBLERPC::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t
       this->rx_handle_ = rx->handle;
       // Only handles are retained; parent may now free its discovery cache.
       this->node_state = esp32_ble_tracker::ClientState::ESTABLISHED;
-      this->ready_ = true;
-      ESP_LOGI(TAG, "Shelly RPC service ready");
-      this->update();
+      if (this->pairing_ && !this->authenticated_) {
+        this->status_set_warning("Waiting for Shelly BLE pairing/authentication");
+        this->set_timeout("pairing_deadline", this->pairing_timeout_, [this]() {
+          this->fail_("BLE pairing timed out; enable pairing on the Shelly for a new bond");
+        });
+        ESP_LOGI(TAG, "Requesting Shelly BLE encryption/bonding");
+        // ESPHome/ESP-IDF owns security and persistent keys. On reconnection
+        // this reuses an existing bond; no RPC is sent until AUTH_CMPL succeeds.
+        const auto err = this->parent()->pair();
+        if (err != ESP_OK) {
+          ESP_LOGW(TAG, "Unable to request BLE pairing: %d", int(err));
+          this->fail_("Unable to start BLE pairing");
+          break;
+        }
+      }
+      this->start_when_ready_();
       break;
     }
     case ESP_GATTC_WRITE_CHAR_EVT: {

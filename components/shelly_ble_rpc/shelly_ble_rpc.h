@@ -19,10 +19,13 @@ class ShellyBLERPC : public PollingComponent, public ble_client::BLEClientNode {
   void update() override;
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override;
+  void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
   void set_input(uint8_t index, binary_sensor::BinarySensor *sensor) { this->inputs_[index] = sensor; }
   void set_on_delay(uint8_t index, uint32_t delay) { this->on_delays_[index] = delay; }
   void set_connected(binary_sensor::BinarySensor *sensor) { this->connected_ = sensor; }
   void set_response_timeout(uint32_t timeout) { this->response_timeout_ = timeout; }
+  void set_pairing(bool pairing) { this->pairing_ = pairing; }
+  void set_pairing_timeout(uint32_t timeout) { this->pairing_timeout_ = timeout; }
 
  protected:
   enum class Phase : uint8_t { IDLE, WRITE_LENGTH, WRITE_DATA, WAIT_LENGTH, READ_LENGTH, READ_DATA };
@@ -38,6 +41,7 @@ class ShellyBLERPC : public PollingComponent, public ble_client::BLEClientNode {
   void fail_(const char *reason);
   void invalidate_();
   void reset_connection_();
+  void start_when_ready_();
   bool write_(uint16_t handle, uint8_t *data, uint16_t length);
   bool read_(uint16_t handle);
 
@@ -49,6 +53,7 @@ class ShellyBLERPC : public PollingComponent, public ble_client::BLEClientNode {
   std::array<uint8_t, MAX_FRAME_SIZE> frame_{};
   std::array<char, 128> request_{};
   uint32_t response_timeout_{5000};
+  uint32_t pairing_timeout_{30000};
   uint32_t request_id_{0};
   size_t frame_length_{0};
   size_t frame_received_{0};
@@ -62,6 +67,8 @@ class ShellyBLERPC : public PollingComponent, public ble_client::BLEClientNode {
   uint8_t input_index_{0};
   Phase phase_{Phase::IDLE};
   bool ready_{false};
+  bool pairing_{false};
+  bool authenticated_{false};
   bool poll_succeeded_{false};
 };
 
