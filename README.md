@@ -12,7 +12,7 @@ It is neither a built-in ESPHome component nor an official Shelly integration.
 | Shelly device / profile | Available entities | Configuration |
 | --- | --- | --- |
 | Plus i4 | Up to four binary inputs | `input_0` through `input_3` |
-| 1PM switch profile | One relay | `switch_0` |
+| 1PM switch profile (tested on 1PM Gen3) | One relay | `switch_0` |
 | 2PM switch profile | Two independent relays | `switch_0`, `switch_1` |
 | 2PM cover profile | One cover with open, close, and stop | `cover_0` |
 
@@ -23,11 +23,13 @@ can be configured alongside the outputs that the device actually provides.
 Two separate 1PMs require two BLE clients and two component instances.
 
 These are supported RPC functions, not a claim that every model or firmware
-combination has been tested. Physical testing so far covers input polling on
-a **Shelly Plus i4, firmware 1.7.5**, with an ESP32-C3 running ESPHome 2026.8.2.
-The relay, cover, and bonded paths have native tests and successful firmware
-builds, but still need field testing on Shelly hardware. Shelly 2.5
-(Generation 1) does not provide the BLE RPC service used here.
+combination has been tested. Physical testing covers input polling on a
+**Shelly Plus i4, firmware 1.7.5**, and bonded pairing and relay control on a
+**Shelly 1PM Gen3, firmware 2.0.0**, using an ESP32-C3 running ESPHome 2026.8.2.
+The 1PM Gen3 test used `switch_0`, `pairing: true`, and the public GitHub
+component source. The 2PM switch and cover paths have native tests and
+successful firmware builds, but still need field testing on Shelly hardware.
+Shelly 2.5 (Generation 1) does not provide the BLE RPC service used here.
 
 > [!WARNING]
 > On legacy firmware such as Plus i4 1.7.5, enabling BLE RPC makes the
@@ -107,8 +109,9 @@ shelly_ble_rpc:
       name: "Shelly 2PM relay 1"
 ```
 
-For a 1PM, keep `switch_0` and remove `switch_1`. The 2PM must be in
-**switch profile**. See the [complete 2PM switch example](examples/shelly-2pm-switch-ble.yaml).
+For a 1PM, keep `switch_0` and remove `switch_1`. This has been tested with a
+bonded Shelly 1PM Gen3 running firmware 2.0.0. The 2PM must be in **switch
+profile**. See the [complete 2PM switch example](examples/shelly-2pm-switch-ble.yaml).
 
 ### 2PM cover profile
 
@@ -177,7 +180,8 @@ pairing and pairing again.
 Shelly documents [BLE security and bonding](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/BLE/),
 including its “Just Works” pairing model. Pairing encrypts the BLE link but
 does not verify the device's identity with a passkey. This project's bonded
-mode has not yet been validated on physical Shelly 2.x firmware.
+mode has been tested on a Shelly 1PM Gen3 running firmware 2.0.0; other bonded
+device profiles still need hardware testing.
 See the [complete bonded example](examples/shelly-bonded-ble.yaml).
 
 ## Configuration
@@ -254,7 +258,8 @@ esphome config examples/shelly-2pm-cover-ble.yaml
 ```
 
 ESPHome firmware builds for the 2PM switch and cover examples have also
-succeeded. Hardware behavior beyond the i4 input test still needs validation.
+succeeded. Physical testing currently covers the Plus i4 inputs and bonded
+1PM Gen3 relay control; the 2PM profiles still need hardware validation.
 
 ## References
 
