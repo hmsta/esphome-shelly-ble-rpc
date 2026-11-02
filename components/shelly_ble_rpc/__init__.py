@@ -29,6 +29,15 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional("switch_1"): switch.switch_schema(ShellyRPCSwitch),
             cv.Optional("cover_0"): cover.cover_schema(ShellyRPCCover).extend({
                 cv.Optional("position_control", default=False): cv.boolean,
+                cv.Optional("command_retries", default=0): cv.int_range(min=0, max=10),
+                cv.Optional("command_retry_delay", default="5s"): cv.All(
+                    cv.positive_time_period_milliseconds,
+                    cv.Range(min=cv.TimePeriod(seconds=1), max=cv.TimePeriod(seconds=60)),
+                ),
+                cv.Optional("command_expiry", default="60s"): cv.All(
+                    cv.positive_time_period_milliseconds,
+                    cv.Range(min=cv.TimePeriod(seconds=1), max=cv.TimePeriod(seconds=300)),
+                ),
             }),
             cv.Optional("connected"): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_CONNECTIVITY,
@@ -104,6 +113,9 @@ async def to_code(config):
         cg.add(output.set_parent(var))
         cg.add(output.set_position_control(config["cover_0"]["position_control"]))
         cg.add(var.set_cover(output))
+        cg.add(var.set_command_retries(config["cover_0"]["command_retries"]))
+        cg.add(var.set_command_retry_delay(config["cover_0"]["command_retry_delay"]))
+        cg.add(var.set_command_expiry(config["cover_0"]["command_expiry"]))
     if "connected" in config:
         sensor = await binary_sensor.new_binary_sensor(config["connected"])
         cg.add(var.set_connected(sensor))

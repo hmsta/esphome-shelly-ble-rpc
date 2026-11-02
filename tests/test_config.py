@@ -34,6 +34,11 @@ ROOT = Path(__file__).resolve().parents[1]
         ("two_switches", True),
         ("one_switch_only", True),
         ("cover_only", True),
+        ("cover_retries", True),
+        ("cover_retry_negative", False),
+        ("cover_retry_excessive", False),
+        ("cover_delay_short", False),
+        ("cover_expiry_long", False),
         ("cover_and_switch", False),
         ("unknown_switch", False),
     ],
@@ -93,6 +98,17 @@ def test_config(tmp_path, change, valid):
             rpc["cover_0"] = {"name": "Blind", "position_control": True}
         if change == "unknown_switch":
             rpc["switch_2"] = {"name": "Invalid relay"}
+    if change.startswith("cover_retry") or change in ("cover_retries", "cover_delay_short", "cover_expiry_long"):
+        rpc["cover_0"] = {"name": "Blind", "command_retries": 2,
+                          "command_retry_delay": "5s", "command_expiry": "60s"}
+        if change == "cover_retry_negative":
+            rpc["cover_0"]["command_retries"] = -1
+        if change == "cover_retry_excessive":
+            rpc["cover_0"]["command_retries"] = 11
+        if change == "cover_delay_short":
+            rpc["cover_0"]["command_retry_delay"] = "0ms"
+        if change == "cover_expiry_long":
+            rpc["cover_0"]["command_expiry"] = "301s"
     path = tmp_path / "test.yaml"
     path.write_text(yaml.safe_dump(config))
     result = subprocess.run(

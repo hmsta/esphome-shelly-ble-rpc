@@ -28,11 +28,19 @@ class ShellyRPCCover : public cover::Cover {
  public:
   void set_parent(ShellyBLERPC *parent) { this->parent_ = parent; }
   void set_position_control(bool enabled) { this->position_control_ = enabled; }
+  // Local consumers must check these before using the numeric cover position.
+  bool is_position_known() const { return this->feedback_valid_ && this->position_known_ && !this->device_error_; }
+  bool is_feedback_valid() const { return this->feedback_valid_; }
+  bool has_device_error() const { return this->device_error_; }
+  void invalidate_feedback() { this->feedback_valid_ = false; this->position_known_ = false; }
+  void set_device_error(bool error) { this->device_error_ = error; }
   cover::CoverTraits get_traits() override;
   void report(float position, cover::CoverOperation operation, bool position_known);
  protected:
   void control(const cover::CoverCall &call) override;
   ShellyBLERPC *parent_{nullptr};
+  bool feedback_valid_{false};
+  bool device_error_{false};
   bool position_known_{false};
   bool position_control_{false};
 };
@@ -52,6 +60,9 @@ class ShellyBLERPC : public PollingComponent, public ble_client::BLEClientNode {
   void set_connected(binary_sensor::BinarySensor *sensor) { this->connected_ = sensor; }
   void set_switch(uint8_t index, ShellyRPCSwitch *output) { this->switches_[index] = output; }
   void set_cover(ShellyRPCCover *output) { this->cover_ = output; }
+  void set_command_retries(uint8_t count) { this->command_retries_ = count; }
+  void set_command_retry_delay(uint32_t delay) { this->command_retry_delay_ = delay; }
+  void set_command_expiry(uint32_t expiry) { this->command_expiry_ = expiry; }
   void command_switch(uint8_t index, bool state);
   void command_cover(uint8_t command, uint8_t position = 0);
   void set_response_timeout(uint32_t timeout) { this->response_timeout_ = timeout; }
@@ -65,6 +76,8 @@ class ShellyBLERPC : public PollingComponent, public ble_client::BLEClientNode {
   // Always fits the mandatory minimum ATT MTU (23). No dependency on MTU negotiation.
   static constexpr size_t WRITE_CHUNK_SIZE = 20;
 
+  void cancel_cover_intent_();
+  void check_cover_intent_(float position, cover::CoverOperation operation, bool known, bool error, bool calibrating);
   void start_request_();
   void start_poll_request_();
   void advance_poll_();
@@ -87,6 +100,15 @@ class ShellyBLERPC : public PollingComponent, public ble_client::BLEClientNode {
   std::array<bool, 2> pending_outputs_{};
   std::array<bool, 2> command_switch_pending_{};
   std::array<bool, 2> command_switch_state_{};
+  uint8_t command_retries_{0};
+  uint32_t command_retry_delay_{5000};
+  uint32_t command_expiry_{60000};
+  uint32_t cover_generation_{0};
+  uint32_t request_cover_generation_{0};
+  uint8_t cover_intent_{0};
+  uint8_t cover_attempts_{0};
+  bool cover_recovery_{false};
+  bool cover_retry_ready_{false};
   uint8_t cover_command_pending_{0};
   uint8_t cover_target_{0};
   bool poll_active_{false};

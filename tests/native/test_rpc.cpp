@@ -418,7 +418,173 @@ void test_pairing_failures_and_event_order() {
   }
 }
 
+
+struct CoverFixture : Fixture {
+  CoverFixture(unsigned retries = 2) : Fixture(false) {
+    rpc.set_input(2, nullptr);
+    cover.set_parent(&rpc);
+    rpc.set_cover(&cover);
+    rpc.set_command_retries(retries);
+    connect();
+    status("open");
+  }
+  void status(const char *state, const char *extra = "") {
+    auto id = request_rpc("Cover.GetStatus", 0);
+    frame("{\"id\":" + std::to_string(id) + ",\"result\":{\"id\":0,\"state\":\"" + state + "\"" + extra + "}}");
+  }
+  void lost_close() {
+    rpc.command_cover(2);
+    request_rpc("Cover.Close", 0);
+    rpc.fire("rpc_deadline");
+    assert(!cover.is_feedback_valid() && !cover.is_position_known());
+  }
+  void reconnect_ready() {
+    rpc.fire("cover_retry");
+    connect();
+  }
+};
+
+void test_cover_recovery() {
+  { // A lost Stop must be retried if the motor is still moving.
+    CoverFixture f;
+    f.rpc.command_cover(3);
+    f.request_rpc("Cover.Stop", 0);
+    f.rpc.fire("rpc_deadline");
+    f.reconnect_ready();
+    f.status("closing");
+    f.request_rpc("Cover.Stop", 0);
+  }
+  { // Expiry also cancels a command queued behind another transaction.
+    CoverFixture f;
+    f.rpc.update();
+    auto id = f.request_rpc("Cover.GetStatus", 0);
+    f.rpc.command_cover(2);
+    f.rpc.fire("cover_expiry");
+    f.frame("{\"id\":" + std::to_string(id) + ",\"result\":{\"id\":0,\"state\":\"open\"}}");
+    assert(f.rpc.timers.empty());
+  }
+  { // Status confirms the lost command executed; no duplicate movement.
+    CoverFixture f;
+    f.lost_close();
+    f.reconnect_ready();
+    f.status("closed");
+    assert(f.rpc.timers.empty() && f.cover.is_position_known());
+  }
+  { // Closing takes time; do not restart its travel timer.
+    CoverFixture f;
+    f.lost_close();
+    f.reconnect_ready();
+    f.status("closing");
+    assert(!f.rpc.timers.count("rpc_deadline"));
+    f.rpc.update();
+    f.status("closed");
+    assert(f.rpc.timers.empty());
+  }
+  { // Retry only after a fresh status, and at most twice after the first send.
+    CoverFixture f;
+    f.lost_close();
+    for (int i = 0; i < 2; i++) {
+      f.reconnect_ready();
+      f.status("open");
+      f.request_rpc("Cover.Close", 0);
+      f.rpc.fire("rpc_deadline");
+    }
+    f.reconnect_ready();
+    f.status("open");
+    assert(f.rpc.timers.empty());
+  }
+  { // Reconnect before retry delay must not bypass the delay.
+    CoverFixture f;
+    f.lost_close();
+    f.connect();
+    f.status("open");
+    assert(!f.rpc.timers.count("rpc_deadline"));
+    f.rpc.fire("cover_retry");
+    f.status("open");
+    f.request_rpc("Cover.Close", 0);
+  }
+  { // Default is no retry, including after reconnect.
+    CoverFixture f(0);
+    f.lost_close();
+    assert(f.rpc.timers.empty());
+    f.connect();
+    f.status("open");
+    assert(f.rpc.timers.empty());
+  }
+  { // Expiry while disconnected prevents a much later replay.
+    CoverFixture f;
+    f.lost_close();
+    f.rpc.fire("cover_expiry");
+    f.connect();
+    f.status("open");
+    assert(f.rpc.timers.empty());
+  }
+  { // Stop while offline cancels the old Close, even though Stop cannot be sent.
+    CoverFixture f;
+    f.lost_close();
+    f.rpc.command_cover(3);
+    f.connect();
+    f.status("open");
+    assert(f.rpc.timers.empty());
+  }
+  { // A device-reported obstruction ends recovery; never retry past it.
+    CoverFixture f;
+    f.lost_close();
+    f.reconnect_ready();
+    f.status("stopped", ",\"errors\":[\"obstruction\"],\"current_pos\":40");
+    assert(f.cover.has_device_error() && !f.cover.is_position_known());
+    assert(f.cover.is_feedback_valid() && f.rpc.timers.empty());
+  }
+  { // Calibration is not a stationary endpoint to retry against.
+    CoverFixture f;
+    f.lost_close();
+    f.reconnect_ready();
+    f.status("calibrating");
+    assert(!f.cover.is_position_known() && f.rpc.timers.empty());
+  }
+  { // Explicit RPC rejection is terminal, not a transport retry.
+    CoverFixture f;
+    f.rpc.command_cover(2);
+    auto id = f.request_rpc("Cover.Close", 0);
+    f.frame("{\"id\":" + std::to_string(id) + ",\"error\":{\"code\":-103}}");
+    assert(f.rpc.timers.empty());
+    f.connect();
+    f.status("open");
+    assert(f.rpc.timers.empty());
+  }
+  { // An old status cannot cancel a newer command waiting behind it.
+    CoverFixture f;
+    f.rpc.update();
+    auto id = f.request_rpc("Cover.GetStatus", 0);
+    f.rpc.command_cover(2);
+    f.frame("{\"id\":" + std::to_string(id) + ",\"result\":{\"id\":0,\"state\":\"closed\"}}");
+    f.request_rpc("Cover.Close", 0);
+  }
+  { // New command supersedes an in-flight command whose reply arrives later.
+    CoverFixture f;
+    f.rpc.command_cover(2);
+    auto id = f.request_rpc("Cover.Close", 0);
+    f.rpc.command_cover(1);
+    f.frame("{\"id\":" + std::to_string(id) + ",\"result\":null}");
+    id = f.request_rpc("Cover.Open", 0);
+    f.frame("{\"id\":" + std::to_string(id) + ",\"result\":null}");
+    f.status("open");
+    assert(f.rpc.timers.empty());
+  }
+  { // An ACK alone does not prove the destination, nor cause blind retries.
+    CoverFixture f;
+    f.rpc.command_cover(2);
+    auto id = f.request_rpc("Cover.Close", 0);
+    f.frame("{\"id\":" + std::to_string(id) + ",\"result\":null}");
+    f.status("stopped", ",\"current_pos\":null,\"last_direction\":\"close\"");
+    assert(!f.cover.is_position_known() && !f.rpc.timers.count("rpc_deadline"));
+    f.rpc.fire("cover_expiry");
+    assert(f.rpc.timers.empty());
+  }
+}
+
 int main() {
+  test_cover_recovery();
   {
     Fixture f;
     f.rpc.set_on_delay(0, 10000);

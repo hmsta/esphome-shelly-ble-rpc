@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 
 #include "esphome/components/esp32_ble/ble_uuid.h"
@@ -49,6 +50,7 @@ void ShellyRPCCover::control(const cover::CoverCall &call) {
 }
 
 void ShellyRPCCover::report(float position, cover::CoverOperation operation, bool position_known) {
+  this->feedback_valid_ = true;
   this->position_known_ = position_known;
   if (position_known)
     this->position = position;
@@ -88,6 +90,8 @@ void ShellyBLERPC::invalidate_() {
     if (sensor != nullptr)
       sensor->invalidate_state();
   }
+  if (this->cover_ != nullptr)
+    this->cover_->invalidate_feedback();
   // ESPHome switches and covers retain their last known value. The diagnostic
   // entity below signals that those values are stale until the next poll.
   if (this->connected_ != nullptr)
@@ -96,6 +100,19 @@ void ShellyBLERPC::invalidate_() {
 }
 
 void ShellyBLERPC::reset_connection_() {
+  // Preserve only opt-in, bounded intent in RAM. Reconnect always polls first.
+  if (this->cover_intent_ != 0) {
+    if (this->command_retries_ == 0) {
+      this->cancel_cover_intent_();
+    } else {
+      this->cover_recovery_ = true;
+      if (!this->cover_retry_ready_)
+        this->set_timeout("cover_retry", this->command_retry_delay_, [this]() {
+          this->cover_retry_ready_ = true;
+          this->update();
+        });
+    }
+  }
   this->cancel_timeout("rpc_deadline");
   this->cancel_timeout("rpc_next");
   this->cancel_timeout("pairing_deadline");
@@ -142,23 +159,75 @@ void ShellyBLERPC::command_switch(uint8_t index, bool state) {
     this->start_next_command_();
 }
 
+void ShellyBLERPC::cancel_cover_intent_() {
+  this->cover_generation_++;
+  this->cover_intent_ = 0;
+  this->cover_command_pending_ = 0;
+  this->cover_recovery_ = false;
+  this->cover_retry_ready_ = false;
+  this->cancel_timeout("cover_expiry");
+  this->cancel_timeout("cover_retry");
+}
+
 void ShellyBLERPC::command_cover(uint8_t command, uint8_t position) {
-  if (this->cover_ == nullptr || command < 1 || command > 4)
+  if (this->cover_ == nullptr || command < 1 || command > 4 || position > 100)
     return;
+  // Even an offline Stop/opposite command cancels the old intent.
+  this->cancel_cover_intent_();
   if (!this->ready_) {
-    ESP_LOGW(TAG, "Cover command ignored: Shelly BLE RPC is not ready");
+    ESP_LOGW(TAG, "Cover command ignored: Shelly BLE RPC is not ready; previous command cancelled");
     return;
   }
+  this->cover_intent_ = command;
+  this->cover_attempts_ = 0;
   this->cover_command_pending_ = command;
   this->cover_target_ = position;
-  if (this->ready_ && this->phase_ == Phase::IDLE)
+  this->set_timeout("cover_expiry", this->command_expiry_, [this]() {
+    ESP_LOGW(TAG, "Cover command expired without confirmed completion; no further retries");
+    this->cancel_cover_intent_();
+  });
+  if (this->phase_ == Phase::IDLE)
     this->start_next_command_();
+}
+
+void ShellyBLERPC::check_cover_intent_(float position, cover::CoverOperation operation,
+                                      bool known, bool error, bool calibrating) {
+  if (!this->cover_intent_ || this->request_cover_generation_ != this->cover_generation_)
+    return;  // A status requested before the latest command cannot confirm it.
+  if (error || calibrating) {
+    ESP_LOGW(TAG, "Cover fault/calibration reported; command retries cancelled");
+    this->cancel_cover_intent_();
+    return;
+  }
+  const bool idle = operation == cover::COVER_OPERATION_IDLE;
+  const float target = this->cover_intent_ == 1 ? 1.0f :
+                       this->cover_intent_ == 2 ? 0.0f : this->cover_target_ / 100.0f;
+  if (idle && (this->cover_intent_ == 3 || (known && std::fabs(position - target) < 0.005f))) {
+    ESP_LOGD(TAG, "Cover command completion confirmed by status");
+    this->cancel_cover_intent_();
+    return;
+  }
+  // Never restart a moving motor. Stop is the exception: if its reply was
+  // lost and fresh status still shows movement, retrying Stop is appropriate.
+  // An acknowledgement alone is not a reason to resend.
+  if ((!idle && this->cover_intent_ != 3) || !this->cover_recovery_ || !this->cover_retry_ready_)
+    return;
+  if (this->cover_attempts_ >= 1 + this->command_retries_) {
+    ESP_LOGW(TAG, "Cover retry budget exhausted");
+    this->cancel_cover_intent_();
+    return;
+  }
+  this->cover_command_pending_ = this->cover_intent_;
+  this->cover_recovery_ = false;
+  this->cover_retry_ready_ = false;
+  ESP_LOGW(TAG, "Retrying cover command after fresh status check");
 }
 
 void ShellyBLERPC::start_next_command_() {
   if (!this->ready_ || this->phase_ != Phase::IDLE)
     return;
   if (this->cover_command_pending_ != 0) {
+    this->cover_attempts_++;
     this->request_kind_ = RequestKind::COVER_COMMAND;
     this->request_channel_ = 0;
     this->request_cover_command_ = this->cover_command_pending_;
@@ -213,6 +282,7 @@ void ShellyBLERPC::advance_poll_() {
 }
 
 void ShellyBLERPC::start_request_() {
+  this->request_cover_generation_ = this->cover_generation_;
   // Positive signed-range IDs are supported by Shelly and unambiguous in JSON.
   this->request_id_ = (this->request_id_ % 0x7FFFFFFFU) + 1;
   const char *method = nullptr;
@@ -301,6 +371,8 @@ void ShellyBLERPC::process_frame_() {
   int error_code = 0;
   float cover_position = 0.5f;
   bool cover_position_known = false;
+  bool cover_error = false;
+  bool cover_calibrating = false;
   cover::CoverOperation cover_operation = cover::COVER_OPERATION_IDLE;
   bool parsed = json::parse_json(this->frame_.data(), this->frame_received_, [&](JsonObject root) {
     if (!root["id"].is<uint32_t>() || root["id"].as<uint32_t>() != this->request_id_)
@@ -311,7 +383,7 @@ void ShellyBLERPC::process_frame_() {
       return true;
     }
     if (this->request_kind_ == RequestKind::COVER_COMMAND) {
-      valid_result = root["result"].isNull();
+      valid_result = root["result"].isNull() && !root["result"].isUnbound();
       return true;
     }
     JsonObject result = root["result"];
@@ -333,6 +405,8 @@ void ShellyBLERPC::process_frame_() {
       const char *state = result["state"];
       if (state == nullptr)
         return true;
+      cover_error = result["errors"].is<JsonArray>() && result["errors"].as<JsonArray>().size() != 0;
+      cover_calibrating = strcmp(state, "calibrating") == 0;
       if (strcmp(state, "opening") == 0)
         cover_operation = cover::COVER_OPERATION_OPENING;
       else if (strcmp(state, "closing") == 0)
@@ -342,7 +416,7 @@ void ShellyBLERPC::process_frame_() {
         return true;
       if (result["current_pos"].is<float>() || result["current_pos"].is<int>()) {
         float pos = result["current_pos"].as<float>();
-        if (pos < 0 || pos > 100)
+        if (!std::isfinite(pos) || pos < 0 || pos > 100)
           return true;
         cover_position = pos / 100.0f;
         cover_position_known = true;
@@ -367,6 +441,9 @@ void ShellyBLERPC::process_frame_() {
   }
   if (error_code != 0) {
     ESP_LOGW(TAG, "Shelly RPC error %d for channel %u", error_code, this->request_channel_);
+    if ((this->request_kind_ == RequestKind::COVER_COMMAND || this->request_kind_ == RequestKind::COVER_STATUS) &&
+        this->request_cover_generation_ == this->cover_generation_)
+      this->cancel_cover_intent_();
     this->fail_(error_code == 401 ? "RPC password authentication required (not supported by BLE bonding)" : "Shelly rejected RPC request");
     return;
   }
@@ -383,8 +460,11 @@ void ShellyBLERPC::process_frame_() {
     this->start_next_command_();
     return;
   }
-  if (this->request_kind_ == RequestKind::COVER_STATUS)
-    this->cover_->report(cover_position, cover_operation, cover_position_known);
+  if (this->request_kind_ == RequestKind::COVER_STATUS) {
+    this->cover_->set_device_error(cover_error);
+    this->cover_->report(cover_position, cover_operation, cover_position_known && !cover_error && !cover_calibrating);
+    this->check_cover_intent_(cover_position, cover_operation, cover_position_known, cover_error, cover_calibrating);
+  }
   this->advance_poll_();
 }
 

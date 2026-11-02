@@ -198,6 +198,9 @@ RPC components and profile.
 | `switch_0`, `switch_1` | Omitted | ESPHome switches for relay IDs 0 and 1. Configure only relays the device provides. |
 | `cover_0` | Omitted | ESPHome cover for cover ID 0; cannot be combined with relay switches in the same instance. |
 | `cover_0.position_control` | `false` | Enables position commands and reporting for a calibrated cover. |
+| `cover_0.command_retries` | `0` | Extra attempts after transport failure, 0–10. Opt-in; applies only to cover commands. |
+| `cover_0.command_retry_delay` | `5s` | Minimum wait after transport failure before retry eligibility, 1–60 seconds. A fresh status check is still required. |
+| `cover_0.command_expiry` | `60s` | Maximum lifetime of pending command intent, 1–300 seconds from the original command. |
 | `connected` | Omitted | Binary sensor reporting BLE/RPC availability. |
 | `update_interval` | `5s` | Polling interval for configured inputs and output status. |
 | `response_timeout` | `5s` | RPC reply timeout, from `500ms` to `30s`. |
@@ -216,7 +219,8 @@ available where appropriate. See [ESPHome binary sensors](https://esphome.io/com
   while accounting for BLE traffic and device responsiveness.
 - Relay commands use `Switch.Set`; cover commands use the Shelly cover RPC
   methods. Commands and polls share one serialized RPC channel. A timeout
-  does not automatically replay a potentially completed command.
+  does not replay a potentially completed command unless cover retries are
+  explicitly enabled as described below.
 - Output state is read back from the Shelly. After a disconnect, the last
   displayed relay or cover state can be stale until a successful read.
   The `connected` sensor drops and input states are invalidated.
@@ -224,6 +228,59 @@ available where appropriate. See [ESPHome binary sensors](https://esphome.io/com
   power or energy metering are not exposed by this component.
 - RPC messages larger than 2048 bytes are unsupported. A Shelly with a
   particularly large status response may exceed that limit.
+
+### Optional cover command recovery
+
+Add these settings to an existing `cover_0` block:
+
+```yaml
+cover_0:
+  id: shelly_cover_output
+  name: "Shelly cover"
+  position_control: false
+  command_retries: 2
+  command_retry_delay: 5s
+  command_expiry: 60s
+```
+
+This permits three total transmission attempts. After a transport failure the
+component reconnects and reads fresh cover status before deciding whether to
+retry. If the requested destination is already reported, it completes without
+resending. While the motor is moving, it waits rather than restarting movement.
+An uncertain Stop can be retried when status still shows movement. An explicit
+RPC rejection, reported cover error, or calibration state cancels recovery.
+An acknowledged command is monitored through normal polls; acknowledgement
+alone never counts as reaching the destination or justifies another send.
+
+A newer command, including Stop, cancels previous pending intent. Commands
+issued while disconnected are rejected, but still cancel the old intent.
+Expiry prevents further retries; it does **not** stop movement already underway.
+Pending commands live only in RAM, never survive an ESP32 restart, and add no
+flash writes. Normal BLE reconnection and polling continue after retry expiry.
+
+### Position validity for local integrations
+
+The cover object provides these C++ getters for ESPHome lambdas:
+
+- `id(shelly_cover_output).is_feedback_valid()` — a valid status has been read
+  since the last connection reset; this is not an independent age timeout.
+- `id(shelly_cover_output).is_position_known()` — fresh feedback contains a
+  usable position or endpoint, with no reported fault or calibration in progress.
+- `id(shelly_cover_output).has_device_error()` — the most recent status contained
+  a nonempty `errors` array. Check feedback validity before using this flag.
+
+`stopped` with a missing/null position is unknown. `last_direction` alone does
+not establish an endpoint. Open/closed reports are accepted as Shelly-reported
+endpoints; this is not independent physical end-stop verification.
+
+These getters create no additional HA entities. The native numeric cover
+representation still cannot convey every validity condition: its existing
+unknown-position placeholder is 50%, and disconnected values can remain stale.
+Do not treat that numeric value as authoritative without checking validity.
+In particular, copying it directly into an ESPHome template valve does not
+provide an unknown valve state in HA: the native valve API has no corresponding
+validity field. Persistent valve position and a Tank51-specific wrapper are not
+implemented by this component.
 
 ## Troubleshooting
 
